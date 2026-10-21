@@ -27,7 +27,7 @@ Se você já está familiarizado com a API do Telegram e já mexeu bom bots segu
 Se você quiser utiliar o Docker para não ter que instalar o Node e nem as dependências diretamente na sua máquina siga os seguintes passos
 
 1. Copie `src/.env.example` para `src/.env` e preencha `DATABASE_URL`
-2. Rode `docker compose up -d --build` (ou use a imagem publicada: `stephankamus/olx-monitor:latest`)
+2. Rode `docker compose up -d --build` (ou use a imagem publicada: `stephankamus/homedev:olx-monitor`)
 3. Para adicionar/remover buscas ou mudar o intervalo **não** é necessário rebuildar a imagem: use o bot do Telegram
 
 
