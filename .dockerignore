@@ -1,13 +1,13 @@
 ./assets
 ./_extras
+./data
 ./src/.env
-./src/config.js
 ./src/.env.example
-./src/sample-config.js
 ./src/node_modules
-
 *.db
 *.sqlite
-
 .git
+.github
 npm-debug.log
+readme.md
+LICENSE

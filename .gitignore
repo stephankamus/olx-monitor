@@ -1,6 +1,10 @@
 /_extras
+node_modules
+src/node_modules
 .env
 scrapper.log
-config.js
 *.db
 *.sqlite
+data/
+package-lock.json
+!src/package-lock.json

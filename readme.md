@@ -14,23 +14,21 @@ Se você já está familiarizado com a API do Telegram e já mexeu bom bots segu
 
 ### Usando Node
 
-1. Clonar ou fazer download do repositório `git clone https://github.com/carmolim/olx-monitor.git`
+1. Clonar ou fazer download do repositório `git clone https://github.com/stephankamus/olx-monitor.git`
 1. Acessar a pasta onde os arquivos js se encontram `cd src`
 1. Instalar as dependências com o comando `npm install`
-1. Renomear o arquivo `example.env` para `.env` e incluir as informações do seu BOT e do seu grupo que irá receber as notificações
-1. Incluir as URLs que você quer que sejam monitoradas no arquivo `config.js`
-1. Definir qual o intervalo que você quer que as buscas sejam feitas no arquivo `config.js`
-1. Executar o script usando o comando `node index.js`
-1. Acompanhar o andamento do script no Terminal
-1. Se correu tudo certo, dois novos arquivos foram criados dentro da pasta `data`: `ads.db` que é o banco de dados e o `scrapper.log` com os logs de execução do script
+1. Copiar `src/.env.example` para `src/.env` e preencher ao menos `DATABASE_URL` (Postgres)
+1. Executar o script com `npm start` (ou `npm run dev` com nodemon)
+1. Acompanhar o andamento no terminal (log em JSON, via `pino`)
+1. O schema `olx_monitor_*` é criado automaticamente na primeira execução. As buscas monitoradas **não** ficam mais no `config.js`: elas vivem no banco e são administradas pelo bot do Telegram (`/olx ...`)
 
 ### Usando docker-compose
 
 Se você quiser utiliar o Docker para não ter que instalar o Node e nem as dependências diretamente na sua máquina siga os seguintes passos
 
-1. Realize os passos 1 a 7 do guia usando Node
-2. Na primeira vez que você for rodar é preciso buildar a imagem rodando o comando `docker-compose build`
-3. Nas próximas vezes só é necessário rodar o comando `docker-compose up`
+1. Copie `src/.env.example` para `src/.env` e preencha `DATABASE_URL`
+2. Rode `docker compose up -d --build` (ou use a imagem publicada: `stephankamus/olx-monitor:latest`)
+3. Para adicionar/remover buscas ou mudar o intervalo **não** é necessário rebuildar a imagem: use o bot do Telegram
 
 
 ### Configuração do Telegram
@@ -49,12 +47,18 @@ Depois de incluir o no grupo, basta digitar `/getgroupid@myidbot` e bot irá res
 
 #### Editando seu ambiênte
 
-Dentro do repositório tem um arquivo chamado `example.env`, você precisa renomea-lo para apenas `.env` e preencher as informações que você acabou de pegar. 
+Dentro do repositório existe o `src/.env.example`; copie para `src/.env` e preencha.
 
-| Variável          | Exemplo                                |
-| ----------------- | -------------------------------------- |
-| TELEGRAM_TOKEN    | Token do seu bot gerado pelo BotFather |
-| TELEGRAM_CHAT\_ID | ID do seu chat                         |
+| Variável | Exemplo / observação |
+| --- | --- |
+| `DATABASE_URL` | `postgresql://usuario:senha@host:5432/banco` — **obrigatório** |
+| `TELEGRAM_TOKEN` | opcional (fallback). O normal é ler de `chats_telegram.token` |
+| `TELEGRAM_CHAT_ID` | opcional (fallback). O normal é ler de `usuarios.chatid_telegram` |
+| `DEFAULT_INTERVAL_MINUTES` | 360 (4x por dia) |
+| `TICK_SECONDS` | 60 — de quanto em quanto tempo o processo procura busca vencida |
+| `MIN_DROP_PERCENT` | 0 — alerta qualquer queda de preço |
+| `MAX_PAGES` | 100 — limite de páginas por busca |
+| `LOG_LEVEL` | `info`, `debug`, ... |
 
 ### O que deve ser monitorado?
 
@@ -62,7 +66,7 @@ Eu não sei o que você está procurando no OLX, mas você precisa dizer para o 
 
 Recomendo utilizar filtros bem específicos para não gerar resultados com muitos itens. Como esse script irá varrer todos os resultados encontrados, pode ser possível que não seja possível passar por todos os resultados dentro do intervalo definido, isso pode fazer com que o Olx perceba uma quantidade alta de chamadas do seu IP e faça algum bloqueio. Isso nunca me aconteceu, mas pode acontecer.
 
-Você pode utilizar uma ou mais pesquisas, basta apenas incluir as `URLs` no arquivo `config.js` dentro da variável `URLs`
+A partir da v2 as buscas ficam no Postgres (tabela `olx_monitor_busca`) e são administradas pelo bot do Telegram. O `config.js` só serve como *seed*: se a tabela estiver vazia, as URLs da variável `config.urls` (ou de `SEED_URLS`) são cadastradas na primeira execução.
 
 #### Exemplos
 
@@ -87,11 +91,31 @@ config.urls = [
 
 Quando mais específica sua busca for mais eficiente o script será, se você só buscar por iPhone, no Brasil todo, você vai receber muitas notificações por dia, não vai ser muito legal.
 
+## Administrando as buscas pelo Telegram
+
+Os comandos `/olx ...` são atendidos pelo **TelegramServico** (.NET), que escreve direto no Postgres. O scraper só lê o banco a cada tick, então qualquer alteração vale sem restart e sem rebuild da imagem.
+
+| Comando | Efeito |
+| --- | --- |
+| `/olx` | mostra a ajuda |
+| `/olx listar` | lista as buscas (id, apelido, intervalo, último status) |
+| `/olx add <url> [apelido] [intervalo_min]` | cria (ou reativa) uma busca |
+| `/olx remover <id>` | remove a busca e o histórico dela |
+| `/olx pausar <id>` / `/olx ativar <id>` | pausa / reativa mantendo o histórico |
+| `/olx intervalo <id> <min>` | muda o intervalo (15 a 10080 minutos) |
+| `/olx rodar [id]` | enfileira execução imediata |
+| `/olx ultimos <id> [n]` | últimos anúncios encontrados |
+| `/olx status [id]` | últimas execuções (código, páginas, faixa de preço, erro) |
+
+> Importante: um token de bot só pode ter **um** processo fazendo polling. Os comandos `/olx` usam o mesmo bot do TelegramServico; o olx-monitor apenas **envia** notificações (sendMessage), o que não conflita.
+
 ## Funcionamento
 
-O funcionamamento do script é simples. Ele percorre um `array` de `URLs` copiadas do OLX, que já contém os filtros de preço mínimo, máximo e etc, encontra os anúncios dentro dessa página e inclui os anúncios encontrados em um banco de dados SQLite e também envia uma notificação para um BOT no Telegram. 
+O script percorre as buscas cadastradas no banco (URLs copiadas do OLX, que já contém os filtros de preço mínimo, máximo etc.), encontra os anúncios dentro da página e persiste em Postgres, nas tabelas `olx_monitor_*`, além de notificar por Telegram.
 
-As entradas salvas no banco de dados são utilizadas posteriormente para detectar alterações nos preços, que também são notificadas através do Telegram.
+Cada anúncio é identificado por `(busca_id, anuncio_id)`, onde `anuncio_id` é o `listId` do OLX. Os preços ficam registrados em `olx_monitor_anuncio_preco`, o que permite histórico e gráficos depois. A primeira execução de uma busca **não** notifica (só cria o baseline); a partir daí, anúncios novos e quedas de preço geram mensagem — cada alerta é enviado uma única vez por preço.
+
+Uma rodada é registrada em `olx_monitor_execucao` com código de sucesso/falha, páginas lidas e faixa de preço. Se o OLX bloquear (403/Cloudflare), a rodada falha e **nenhum** anúncio é marcado como "saiu".
 
 
 ## Considerações

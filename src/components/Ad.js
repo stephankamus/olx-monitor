@@ -1,126 +1,151 @@
-'use strict';
-
-const notifier = require('./Notifier')
+const config = require('../config')
 const $logger = require('./Logger')
-
-const adRepository = require('../repositories/adRepository.js')
+const adRepository = require('../repositories/adRepository')
+const notifier = require('./Notifier')
 
 class Ad {
 
-    constructor(ad) {
-        this.id         = ad.id
-        this.url        = ad.url
-        this.title      = ad.title
-        this.searchTerm = ad.searchTerm
-        this.price      = ad.price
-        this.valid      = false
-        this.saved      = null,
-        this.notify     = ad.notify
+  constructor ({ buscaId, anuncioId, titulo, preco, url, apelido, idUsuario, deveNotificar }) {
+    this.buscaId = buscaId
+    this.anuncioId = anuncioId
+    this.titulo = titulo
+    this.preco = preco
+    this.url = url
+    this.apelido = apelido
+    this.idUsuario = idUsuario
+    this.deveNotificar = deveNotificar
+    this.valid = false
+  }
+
+  /**
+   * Persiste o anúncio e retorna o que mudou.
+   * @returns {Promise<{novo: boolean, precoAlterado: boolean, notificado: boolean}>}
+   */
+  process = async () => {
+    if (!this.isValidAd()) {
+      $logger.debug({ anuncioId: this.anuncioId }, 'Anúncio inválido, ignorado')
+      return { novo: false, precoAlterado: false, notificado: false }
     }
 
-    process = async () => {
+    const existente = await adRepository.buscar(this.buscaId, this.anuncioId)
 
-        if (!this.isValidAd()) {
-            $logger.debug('Ad not valid');
-            return false
-        }
-
-        try {
-
-            // check if this entry was already added to DB
-            if (await this.alreadySaved()) {
-                return this.checkPriceChange()
-            }
-
-            else {
-                // create a new entry in the database
-                return this.addToDataBase()
-            }
-
-        } catch (error) {
-            $logger.error(error);
-        }
+    if (!existente) {
+      return this.criarAnuncio()
     }
 
-    alreadySaved = async () => {
-        try {
-            this.saved = await adRepository.getAd(this.id)
-            return true
-        } catch (error) {
-            return false
-        }
+    if (Number(existente.preco) === Number(this.preco)) {
+      await adRepository.registrarVisto(this.buscaId, this.anuncioId)
+      return { novo: false, precoAlterado: false, notificado: false }
     }
 
-    addToDataBase = async () => {
+    return this.atualizarPreco(existente)
+  }
 
-        try {
-            await adRepository.createAd(this)
-            $logger.info('Ad ' + this.id + ' added to the database')
-        }
+  criarAnuncio = async () => {
+    await adRepository.criar({
+      buscaId: this.buscaId,
+      anuncioId: this.anuncioId,
+      titulo: this.titulo,
+      preco: this.preco,
+      url: this.url
+    })
 
-        catch (error) {
-            $logger.error(error)
-        }
+    await adRepository.salvarHistoricoPreco({
+      buscaId: this.buscaId,
+      anuncioId: this.anuncioId,
+      preco: this.preco
+    })
 
-        if (this.notify) {
-            try {
-                const msg = 'New ad found!\n' + this.title + ' - R$' + this.price + '\n\n' + this.url
-                await notifier.sendNotification(msg, this.id)
-            } catch (error) {
-                $logger.error('Could not send a notification')
-            }
-        }
+    $logger.info({ anuncioId: this.anuncioId, preco: this.preco }, 'Novo anúncio salvo')
+
+    // Na primeira execução de uma busca não notificamos, mas registramos o
+    // preço como baseline para futuras quedas.
+    if (!this.deveNotificar) {
+      await adRepository.marcarNotificado(this.buscaId, this.anuncioId, this.preco)
+      return { novo: true, precoAlterado: false, notificado: false }
     }
 
-    updatePrice = async () => {
-        $logger.info('updatePrice')
+    const enviado = await notifier.sendNotification(
+      notifier.mensagemNovoAnuncio({
+        apelido: this.apelido,
+        titulo: this.titulo,
+        preco: this.preco,
+        url: this.url
+      }),
+      { idUsuario: this.idUsuario }
+    )
 
-        try {
-            await adRepository.updateAd(this)
-        } catch (error) {
-            $logger.error(error)
-        }
+    if (enviado.enviados > 0) {
+      await adRepository.marcarNotificado(this.buscaId, this.anuncioId, this.preco)
     }
 
-    checkPriceChange = async () => {
+    return { novo: true, precoAlterado: false, notificado: enviado.enviados > 0 }
+  }
 
-        if (this.price !== this.saved.price) {
+  atualizarPreco = async (existente) => {
+    await adRepository.atualizarPreco({
+      buscaId: this.buscaId,
+      anuncioId: this.anuncioId,
+      titulo: this.titulo,
+      preco: this.preco,
+      url: this.url
+    })
 
-            await this.updatePrice(this)
+    await adRepository.salvarHistoricoPreco({
+      buscaId: this.buscaId,
+      anuncioId: this.anuncioId,
+      preco: this.preco
+    })
 
-            // just send a notification if the price dropped
-            if (this.price < this.saved.price) {
+    $logger.info(
+      { anuncioId: this.anuncioId, de: existente.preco, para: this.preco },
+      'Preço alterado'
+    )
 
-                $logger.info('This ad had a price reduction: ' + this.url)
-
-                const decreasePercentage = Math.abs(Math.round(((this.price - this.saved.price) / this.saved.price) * 100))
-
-                const msg = 'Price drop found! ' + decreasePercentage + '% OFF!\n' +
-                    'From R$' + this.saved.price + ' to R$' + this.price + '\n\n' + this.url
-
-                try {
-                    await notifier.sendNotification(msg, this.id)
-                } catch (error) {
-                    $logger.error(error)
-                }
-            }
-        }
+    // Só interessa queda de preço, e nunca repete o mesmo alerta.
+    if (Number(this.preco) >= Number(existente.preco)) {
+      return { novo: false, precoAlterado: true, notificado: false }
     }
 
-    // some elements found in the ads selection don't have an url
-    // I supposed that OLX adds other content between the ads,
-    // let's clean those empty ads
-    isValidAd = () => {
+    const base = existente.precoNotificado ?? existente.preco
+    const percentual = Math.abs(Math.round(((this.preco - base) / base) * 100))
 
-        if (!isNaN(this.price) && this.url && this.id) {
-            this.valid = true
-            return true
-        }
-        else {
-            this.valid = false
-            return false
-        }
+    if (Number(this.preco) >= Number(base)) {
+      return { novo: false, precoAlterado: true, notificado: false }
     }
+
+    if (percentual < config.minDropPercent) {
+      $logger.debug(
+        { anuncioId: this.anuncioId, percentual, minimo: config.minDropPercent },
+        'Queda abaixo do mínimo configurado, sem notificação'
+      )
+      return { novo: false, precoAlterado: true, notificado: false }
+    }
+
+    const enviado = await notifier.sendNotification(
+      notifier.mensagemQuedaPreco({
+        apelido: this.apelido,
+        titulo: this.titulo,
+        precoAnterior: base,
+        preco: this.preco,
+        percentual,
+        url: this.url
+      }),
+      { idUsuario: this.idUsuario }
+    )
+
+    if (enviado.enviados > 0) {
+      await adRepository.marcarNotificado(this.buscaId, this.anuncioId, this.preco)
+    }
+
+    return { novo: false, precoAlterado: true, notificado: enviado.enviados > 0 }
+  }
+
+  // A listagem do OLX mistura blocos que não são anúncios
+  isValidAd = () => {
+    this.valid = Boolean(this.anuncioId && this.url && Number.isFinite(Number(this.preco)) && Number(this.preco) > 0)
+    return this.valid
+  }
 }
 
 module.exports = Ad

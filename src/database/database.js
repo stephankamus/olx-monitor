@@ -1,62 +1,58 @@
+const fs = require('fs')
 const path = require('path')
+const { Pool } = require('pg')
 const config = require('../config')
-const sqlite = require("sqlite3").verbose()
-const db = new sqlite.Database(
-  path.join(__dirname, '../', config.dbFile)
-)
+const $logger = require('../components/Logger')
 
-const createTables = async () => {
-
-  // Define separate SQL statements for each table creation
-  const queries = [
-    `
-    CREATE TABLE IF NOT EXISTS "ads" (
-        "id"            INTEGER NOT NULL UNIQUE,
-        "searchTerm"    TEXT NOT NULL,
-        "title"	        TEXT NOT NULL,
-        "price"         INTEGER NOT NULL,
-        "url"           TEXT NOT NULL,
-        "created"       TEXT NOT NULL,
-        "lastUpdate"    TEXT NOT NULL
-    );`,
-
-    `CREATE TABLE IF NOT EXISTS "logs" (
-        "id"            INTEGER NOT NULL UNIQUE,
-        "url"           TEXT NOT NULL,  
-        "adsFound"      INTEGER NOT NULL, 
-        "averagePrice"  NUMERIC NOT NULL,
-        "minPrice"      NUMERIC NOT NULL,
-        "maxPrice"      NUMERIC NOT NULL, 
-        "created"       TEXT NOT NULL,
-        PRIMARY KEY("id" AUTOINCREMENT)
-    );`
-  ];
-
-  return new Promise(function(resolve, reject) {
-    // Iterate through the array of queries and execute them one by one
-    const executeQuery = (index) => {
-      if (index === queries.length) {
-        resolve(true); // All queries have been executed
-        return;
-      }
-
-      db.run(queries[index], function(error) {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        // Execute the next query in the array
-        executeQuery(index + 1);
-      });
-    };
-
-    // Start executing the queries from index 0
-    executeQuery(0);
-  });
+if (!config.databaseUrl) {
+  throw new Error('DATABASE_URL não configurada. Veja o .env.example.')
 }
 
+const pool = new Pool({
+  connectionString: config.databaseUrl,
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
+})
+
+pool.on('error', (err) => {
+  $logger.error({ err: err.message }, 'Erro inesperado no pool do Postgres')
+})
+
+const query = (text, params) => pool.query(text, params)
+
+// Aplica o schema do módulo (idempotente).
+const init = async () => {
+  const file = path.join(__dirname, '..', 'db', 'init.sql')
+  const sql = fs.readFileSync(file, 'utf8')
+  await pool.query(sql)
+}
+
+// Lock único por processo/dono: garante que duas instâncias nunca executem
+// a mesma rodada em paralelo.
+const LOCK_KEY = 918273645
+
+const tryLock = async () => {
+  const result = await query('SELECT pg_try_advisory_lock($1) AS locked', [LOCK_KEY])
+  return result.rows[0].locked === true
+}
+
+const unlock = async () => {
+  try {
+    await query('SELECT pg_advisory_unlock($1)', [LOCK_KEY])
+  } catch (error) {
+    $logger.error({ err: error.message }, 'Falha ao liberar advisory lock')
+  }
+}
+
+// numeric do Postgres chega como string
+const toNumber = (value) => (value === null || value === undefined ? null : Number(value))
+
 module.exports = {
-  db,
-  createTables
+  pool,
+  query,
+  init,
+  tryLock,
+  unlock,
+  toNumber
 }
